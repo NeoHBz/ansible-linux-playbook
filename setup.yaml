@@ -1,0 +1,111 @@
+---
+- hosts: local
+  become: yes
+
+  vars:
+    dev_packages:
+      - git
+      - zsh
+      - tree
+      - curl
+      - wget
+      - nano
+    git_config:
+      username: "{{ lookup('env', 'GIT_USERNAME') | default('default_username', true) }}"
+      email: "{{ lookup('env', 'GIT_EMAIL') | default('default_email@example.com', true) }}"
+    omzsh_paths:
+      install_script: "https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh"
+      home_dir: "{{ ansible_env.HOME }}/.oh-my-zsh"
+    zsh_plugins:
+      - zsh-syntax-highlighting
+    zsh_theme: "powerlevel10k/powerlevel10k"
+
+  tasks:
+    - name: Install essential development packages
+      apt:
+        name: "{{ dev_packages }}"
+        state: present
+        update_cache: yes
+      register: package_installation
+
+    - name: Configure Git global settings
+      git_config:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        scope: global
+      loop:
+        - { key: user.name, value: "{{ git_config.username }}" }
+        - { key: user.email, value: "{{ git_config.email }}" }
+      register: git_configuration
+
+    - name: Ensure Zsh is installed
+      block:
+        - name: Verify Zsh executable
+          command: which zsh
+          register: zsh_path
+          changed_when: false
+          failed_when: false
+
+        - name: Install Oh My Zsh
+          shell: >
+            sh -c "$(curl -fsSL {{ omzsh_paths.install_script }})" || true
+          args:
+            creates: "{{ omzsh_paths.home_dir }}"
+          environment:
+            ZSH: "{{ omzsh_paths.home_dir }}"
+            RUNZSH: "no"
+          when: zsh_path.rc == 0
+          register: omzsh_installation
+
+    - name: Configure Zsh Plugins and Theme
+      block:
+        - name: Clone Powerlevel10k Theme
+          git:
+            repo: 'https://github.com/romkatv/powerlevel10k.git'
+            dest: "{{ omzsh_paths.home_dir }}/custom/themes/powerlevel10k"
+            depth: 1
+          register: p10k_theme
+
+        - name: Clone Syntax Highlighting Plugin
+          git:
+            repo: 'https://github.com/zsh-users/zsh-syntax-highlighting.git'
+            dest: "{{ omzsh_paths.home_dir }}/custom/plugins/zsh-syntax-highlighting"
+            version: master
+          register: zsh_syntax_plugin
+
+        - name: Update .zshrc Configuration
+          lineinfile:
+            path: "{{ ansible_env.HOME }}/.zshrc"
+            create: yes
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+            insertafter: "{{ item.insertafter | default(omit) }}"
+          loop:
+            - { regexp: '^ZSH_THEME=', line: 'ZSH_THEME="{{ zsh_theme }}"' }
+            - { regexp: '^plugins=', line: 'plugins=({{ zsh_plugins | join(" ") }})' }
+
+    - name: Set Zsh as Default Shell
+      user:
+        name: "{{ ansible_env.USER }}"
+        shell: "{{ zsh_path.stdout }}"
+      when: zsh_path.rc == 0
+
+    - name: Create .hushlogin File
+      file:
+        path: "{{ ansible_env.HOME }}/.hushlogin"
+        state: touch
+      register: hushlogin_file
+
+    - name: Configure Powerlevel10k
+      block:
+        - name: Copy .p10k.zsh Configuration
+          copy:
+            src: assets/zsh/.p10k.zsh
+            dest: "{{ ansible_env.HOME }}/.p10k.zsh"
+          register: p10k_config
+
+        - name: Append P10K Configuration to .zshrc
+          lineinfile:
+            path: "{{ ansible_env.HOME }}/.zshrc"
+            line: '[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh'
+            state: present
